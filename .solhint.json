@@ -1,0 +1,20 @@
+{
+  "extends": "solhint:recommended",
+  "rules": {
+    "no-complex-fallback": "off",
+    "no-empty-blocks": "off",
+    "func-name-mixedcase" : "off",
+    "avoid-tx-origin": "off",
+    "var-name-mixedcase": "off",
+    "no-inline-assembly": "off",
+    "avoid-low-level-calls": "off",
+    "not-rely-on-time": "off",
+    "compiler-version": ["error", "^0.8.0"],
+    "func-visibility": [
+      "warn",
+      {
+        "ignoreConstructors": true
+      }
+    ]
+  }
+}
