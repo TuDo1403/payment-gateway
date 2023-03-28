@@ -229,26 +229,21 @@ contract PaymentGateway is
         address sender_,
         Request memory request_,
         Payment memory payment_
-    ) internal virtual override returns (uint8 paymentType) {
+    ) internal virtual override whenNotPaused returns (uint8 paymentType) {
         if (request_.fnSelector == 0 || payment_.to == address(0))
             revert PaymentGateway__InvalidArgument();
 
         address paymentToken = payment_.token;
-        if (paymentToken == address(0)) return uint8(AssetLabel.NATIVE);
-
-        if (paymentToken.code.length == 0)
-            revert PaymentGateway__InvalidToken(paymentToken);
-
-        if (!paymentToken.supportsInterface(type(IERC165).interfaceId))
-            return uint8(AssetLabel.ERC20);
-        else {
-            if (paymentToken.supportsInterface(type(IERC721).interfaceId))
-                return uint8(AssetLabel.ERC721);
-            else if (
-                paymentToken.supportsInterface(type(IERC1155).interfaceId)
-            ) return uint8(AssetLabel.ERC1155);
-            else revert PaymentGateway__InvalidToken(paymentToken);
-        }
+        return
+            paymentToken == address(0)
+                ? uint8(AssetLabel.NATIVE)
+                : !paymentToken.supportsInterface(type(IERC165).interfaceId)
+                ? uint8(AssetLabel.ERC20)
+                : paymentToken.supportsInterface(type(IERC721).interfaceId)
+                ? uint8(AssetLabel.ERC721)
+                : paymentToken.supportsInterface(type(IERC1155).interfaceId)
+                ? uint8(AssetLabel.ERC1155)
+                : type(uint8).max;
     }
 
     function __handleERC1155Transfer(
