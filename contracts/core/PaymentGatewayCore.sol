@@ -62,9 +62,7 @@ abstract contract PaymentGatewayCore is
             IPaymentGatewayReceiver.canReceiveRequest.selector
         ) revert PaymentGatewayCore__UnsafeRecipient();
 
-        bool success;
-        bytes memory returnOrRevertData;
-        (success, returnOrRevertData) = request_.to.call(
+        (bool success, bytes memory returnOrRevertData) = request_.to.call(
             abi.encodePacked(
                 request_.fnSelector,
                 abi.encode(

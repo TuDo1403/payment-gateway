@@ -30,8 +30,8 @@ import {IPermit2, IPaymentGateway} from "./interfaces/IPaymentGateway.sol";
 import {SigUtil} from "./libraries/SigUtil.sol";
 
 import {
-    SafeCurrencyTransferHandler
-} from "./libraries/SafeCurrencyTransferHandler.sol";
+    SafeERC20
+} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {
     IERC165,
@@ -49,8 +49,9 @@ contract PaymentGateway is
 {
     using SigUtil for bytes;
     using SafeCast for uint256;
+    using SafeERC20 for IERC20;
+    using ErrorHandler for bool;
     using ERC165Checker for address;
-    using SafeCurrencyTransferHandler for address;
 
     IPermit2 public permit2;
 
@@ -77,13 +78,15 @@ contract PaymentGateway is
         uint256 value_,
         bytes calldata data_
     ) external override nonReentrant returns (bytes4) {
-        (Payment memory payment, Request memory request) = __decodeData(
-            from_,
-            data_,
-            abi.encode(id_, value_)
-        );
+        (
+            Payment memory payment,
+            Request memory request
+        ) = __decodePaymentAndRequest(from_, data_, abi.encode(id_, value_));
+
         uint8 paymentType = _beforePayment(operator_, request, payment);
+
         address paymentToken = payment.token;
+
         if (paymentType != uint8(AssetLabel.ERC1155))
             revert PaymentGateway__UnathorizedCall(paymentToken);
 
@@ -109,14 +112,15 @@ contract PaymentGateway is
         uint256[] calldata values_,
         bytes calldata data_
     ) external override nonReentrant returns (bytes4) {
-        (Payment memory payment, Request memory request) = __decodeData(
-            from_,
-            data_,
-            abi.encode(ids_, values_)
-        );
+        (
+            Payment memory payment,
+            Request memory request
+        ) = __decodePaymentAndRequest(from_, data_, abi.encode(ids_, values_));
 
         uint8 paymentType = _beforePayment(operator_, request, payment);
+
         address paymentToken = payment.token;
+
         if (paymentType != uint8(AssetLabel.ERC1155))
             revert PaymentGateway__UnathorizedCall(paymentToken);
 
@@ -141,14 +145,15 @@ contract PaymentGateway is
         uint256 tokenId_,
         bytes calldata data_
     ) external override nonReentrant returns (bytes4) {
-        (Payment memory payment, Request memory request) = __decodeData(
-            from_,
-            data_,
-            abi.encode(tokenId_)
-        );
+        (
+            Payment memory payment,
+            Request memory request
+        ) = __decodePaymentAndRequest(from_, data_, abi.encode(tokenId_));
 
         uint8 paymentType = _beforePayment(operator_, request, payment);
+
         address paymentToken = payment.token;
+
         if (paymentType != uint8(AssetLabel.ERC721))
             revert PaymentGateway__UnathorizedCall(paymentToken);
 
@@ -234,8 +239,7 @@ contract PaymentGateway is
         Payment memory payment_
     ) internal virtual override whenNotPaused returns (uint8 paymentType) {
         if (sender_ != tx.origin) revert PaymentGateway__OnlyEOA(sender_);
-        if (request_.fnSelector == 0 || payment_.to == address(0))
-            revert PaymentGateway__InvalidArgument();
+        if (request_.fnSelector == 0) revert PaymentGateway__InvalidArgument();
 
         address paymentToken = payment_.token;
         return
@@ -372,7 +376,14 @@ contract PaymentGateway is
             }
         }
 
-        paymentToken.safeERC20TransferFrom(from, payment_.to, sendAmount);
+        __safeERC20TransferFrom(
+            supportedEIP2612,
+            _permit2,
+            paymentToken,
+            from,
+            payment_.to,
+            sendAmount
+        );
     }
 
     function __handleNativeTransfer(
@@ -381,25 +392,33 @@ contract PaymentGateway is
     ) private {
         uint256 sendAmount = abi.decode(payment_.extraData, (uint256));
         uint256 refundAmount = msg.value - sendAmount;
-        payment_.to.safeNativeTransfer(sendAmount, "");
+        __safeNativeTransfer(payment_.to, sendAmount);
+
         __refundNative(sender_, refundAmount);
     }
 
     function __refundNative(address to_, uint256 amount_) private {
-        to_.safeNativeTransfer(amount_, "");
+        __safeNativeTransfer(to_, amount_);
         emit Refunded(to_, amount_);
     }
 
+    function __safeNativeTransfer(address to_, uint256 amount_) private {
+        (bool success, bytes memory returnOrRevertData) = to_.call{
+            value: amount_
+        }("");
+        success.handleRevertIfNotSuccess(returnOrRevertData);
+    }
+
     function __safeERC20TransferFrom(
-        bool supportedEIP2612,
+        bool supportedEIP2612_,
         IPermit2 permit2_,
         address token_,
         address from_,
         address to_,
         uint256 amount_
-    ) internal {
-        if (supportedEIP2612)
-            token_.safeERC20TransferFrom(from_, to_, amount_);
+    ) private {
+        if (supportedEIP2612_)
+            IERC20(token_).safeTransferFrom(from_, to_, amount_);
         else permit2_.transferFrom(from_, to_, amount_.toUint160(), token_);
     }
 
@@ -430,7 +449,7 @@ contract PaymentGateway is
         }
     }
 
-    function __decodeData(
+    function __decodePaymentAndRequest(
         address from_,
         bytes calldata data_,
         bytes memory extraData_
