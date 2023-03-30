@@ -7,7 +7,7 @@ dotenv.config();
 
 const config: HardhatUserConfig = {
     solidity: {
-        version: "0.8.18",
+        version: "0.8.19",
 
         settings: {
             evmVersion: "paris",
