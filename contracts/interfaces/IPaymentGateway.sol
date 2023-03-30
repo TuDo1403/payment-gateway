@@ -6,7 +6,9 @@ import {IPermit2} from "../utils/permit2/interfaces/IPermit2.sol";
 import {IPaymentGatewayCore} from "../core/interfaces/IPaymentGatewayCore.sol";
 
 interface IPaymentGateway is IPaymentGatewayCore {
+    error PaymentGateway__OnlyEOA(address);
     error PaymentGateway__InvalidArgument();
+    error PaymentGateway__InsufficientAllowance();
     error PaymentGateway__InvalidToken(address token);
     error PaymentGateway__UnathorizedCall(address caller);
     error PaymentGateway__PermissionNotGranted(address token);
@@ -15,7 +17,8 @@ interface IPaymentGateway is IPaymentGatewayCore {
         NATIVE,
         ERC20,
         ERC721,
-        ERC1155
+        ERC1155,
+        INVALID
     }
 
     event Permit2Changed(

@@ -5,6 +5,7 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Pausable} from "@openzeppelin/contracts/security/Pausable.sol";
 
 import {
+    ErrorHandler,
     PaymentGatewayCore,
     IPaymentGatewayCore
 } from "./core/PaymentGatewayCore.sol";
@@ -31,6 +32,7 @@ import {SigUtil} from "./libraries/SigUtil.sol";
 import {
     SafeCurrencyTransferHandler
 } from "./libraries/SafeCurrencyTransferHandler.sol";
+import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {
     IERC165,
     ERC165Checker
@@ -46,6 +48,7 @@ contract PaymentGateway is
     PaymentGatewayCore
 {
     using SigUtil for bytes;
+    using SafeCast for uint256;
     using ERC165Checker for address;
     using SafeCurrencyTransferHandler for address;
 
@@ -92,9 +95,9 @@ contract PaymentGateway is
             transferData_: payment.extraData
         });
 
-        _call(request, payment);
-
         _afterPayment(paymentToken, paymentType, request, payment);
+
+        _call(request, payment);
 
         return IERC1155Receiver.onERC1155Received.selector;
     }
@@ -125,9 +128,9 @@ contract PaymentGateway is
             transferData_: payment.extraData
         });
 
-        _call(request, payment);
-
         _afterPayment(paymentToken, paymentType, request, payment);
+
+        _call(request, payment);
 
         return IERC1155Receiver.onERC1155BatchReceived.selector;
     }
@@ -158,9 +161,9 @@ contract PaymentGateway is
             signature_: ""
         });
 
-        _call(request, payment);
-
         _afterPayment(paymentToken, paymentType, request, payment);
+
+        _call(request, payment);
 
         return IERC721Receiver.onERC721Received.selector;
     }
@@ -200,8 +203,8 @@ contract PaymentGateway is
                     payment_.from,
                     payment_.to,
                     abi.decode(payment_.extraData, (uint256)),
-                    payment_.deadline,
-                    payment_.signature
+                    payment_.permission.deadline,
+                    payment_.permission.signature
                 );
             else if (paymentType_ == uint8(AssetLabel.ERC1155)) {
                 (bool isBatchTransfer, bytes memory transferData) = abi.decode(
@@ -230,6 +233,7 @@ contract PaymentGateway is
         Request memory request_,
         Payment memory payment_
     ) internal virtual override whenNotPaused returns (uint8 paymentType) {
+        if (sender_ != tx.origin) revert PaymentGateway__OnlyEOA(sender_);
         if (request_.fnSelector == 0 || payment_.to == address(0))
             revert PaymentGateway__InvalidArgument();
 
@@ -243,7 +247,7 @@ contract PaymentGateway is
                 ? uint8(AssetLabel.ERC721)
                 : paymentToken.supportsInterface(type(IERC1155).interfaceId)
                 ? uint8(AssetLabel.ERC1155)
-                : type(uint8).max;
+                : uint8(AssetLabel.INVALID);
     }
 
     function __handleERC1155Transfer(
@@ -309,53 +313,66 @@ contract PaymentGateway is
 
         address from = payment_.from;
         address paymentToken = payment_.token;
-        if (IERC20(paymentToken).allowance(from, address(this)) < sendAmount) {
-            (bytes32 r, bytes32 s, uint8 v) = payment_.signature.split();
 
-            try
+        IPermit2 _permit2 = permit2;
+        (uint256 allowed, bool supportedEIP2612) = __viewSelfAllowance(
+            _permit2,
+            paymentToken,
+            from
+        );
+
+        if (allowed < sendAmount) {
+            if (supportedEIP2612) {
+                (bytes32 r, bytes32 s, uint8 v) = payment_
+                    .permission
+                    .signature
+                    .split();
+
+                uint256 permitAmount = abi.decode(
+                    payment_.permission.extraData,
+                    (uint256)
+                );
+
+                if (permitAmount < sendAmount)
+                    revert PaymentGateway__InsufficientAllowance();
+
                 IERC20Permit(paymentToken).permit(
                     from,
                     address(this),
-                    sendAmount,
-                    payment_.deadline,
+                    permitAmount,
+                    payment_.permission.deadline,
                     v,
                     r,
                     s
-                )
-            {
-                paymentToken.safeERC20TransferFrom(
-                    from,
-                    address(this),
-                    sendAmount
                 );
-            } catch {
-                permit2.permitTransferFrom(
-                    // The permit message.
-                    IPermit2.PermitTransferFrom({
-                        permitted: IPermit2.TokenPermissions({
-                            token: IERC20(paymentToken),
-                            amount: sendAmount
+            } else {
+                (uint160 permitAmount, uint48 expiration, uint48 nonce) = abi
+                    .decode(
+                        payment_.permission.extraData,
+                        (uint160, uint48, uint48)
+                    );
+
+                if (permitAmount < sendAmount)
+                    revert PaymentGateway__InsufficientAllowance();
+
+                _permit2.permit({
+                    owner: from,
+                    permitSingle: IPermit2.PermitSingle({
+                        details: IPermit2.PermitDetails({
+                            token: paymentToken,
+                            amount: permitAmount,
+                            expiration: expiration,
+                            nonce: nonce
                         }),
-                        nonce: payment_.nonce,
-                        deadline: payment_.deadline
+                        spender: address(this),
+                        sigDeadline: payment_.permission.deadline
                     }),
-                    // The transfer recipient and amount.
-                    IPermit2.SignatureTransferDetails({
-                        to: address(this),
-                        requestedAmount: sendAmount
-                    }),
-                    // The owner of the tokens, which must also be
-                    // the signer of the message, otherwise this call
-                    // will fail.
-                    from,
-                    // The packed signature that was the result of signing
-                    // the EIP712 hash of `permit`.
-                    payment_.signature
-                );
+                    signature: payment_.permission.signature
+                });
             }
         }
 
-        paymentToken.safeERC20Transfer(payment_.to, sendAmount);
+        paymentToken.safeERC20TransferFrom(from, payment_.to, sendAmount);
     }
 
     function __handleNativeTransfer(
@@ -371,6 +388,46 @@ contract PaymentGateway is
     function __refundNative(address to_, uint256 amount_) private {
         to_.safeNativeTransfer(amount_, "");
         emit Refunded(to_, amount_);
+    }
+
+    function __safeERC20TransferFrom(
+        bool supportedEIP2612,
+        IPermit2 permit2_,
+        address token_,
+        address from_,
+        address to_,
+        uint256 amount_
+    ) internal {
+        if (supportedEIP2612)
+            token_.safeERC20TransferFrom(from_, to_, amount_);
+        else permit2_.transferFrom(from_, to_, amount_.toUint160(), token_);
+    }
+
+    function __viewSelfAllowance(
+        IPermit2 permit2_,
+        address token_,
+        address owner_
+    ) private view returns (uint256 allowed, bool supportedEIP2612) {
+        (bool success, bytes memory returnOrRevertData) = token_.staticcall(
+            abi.encodeCall(IERC20Permit.DOMAIN_SEPARATOR, ())
+        );
+
+        if (success) {
+            abi.decode(returnOrRevertData, (bytes32));
+            supportedEIP2612 = true;
+            allowed = IERC20(token_).allowance(owner_, address(this));
+        } else {
+            allowed = IERC20(token_).allowance(owner_, address(permit2_));
+            if (allowed != 0) {
+                uint256 expiration;
+                (allowed, expiration, ) = permit2_.allowance(
+                    owner_,
+                    token_,
+                    address(this)
+                );
+                allowed = expiration < block.timestamp ? 0 : allowed;
+            }
+        }
     }
 
     function __decodeData(

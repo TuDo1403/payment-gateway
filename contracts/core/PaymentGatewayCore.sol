@@ -51,9 +51,9 @@ abstract contract PaymentGatewayCore is
 
         _pay(sender, paymentType, payment_);
 
-        _call(request_, payment_);
-
         _afterPayment(sender, paymentType, request_, payment_);
+
+        _call(request_, payment_);
     }
 
     function _call(Request memory request_, Payment memory payment_) internal {

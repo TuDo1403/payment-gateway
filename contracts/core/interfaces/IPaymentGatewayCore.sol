@@ -29,7 +29,11 @@ interface IPaymentGatewayCore {
         address token;
         address from;
         address to;
-        uint256 nonce;
+        bytes extraData;
+        Permission permission;
+    }
+
+    struct Permission {
         uint256 deadline;
         bytes signature;
         bytes extraData;
