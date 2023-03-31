@@ -90,13 +90,13 @@ contract PaymentGateway is
         if (paymentType != uint8(AssetLabel.ERC1155))
             revert PaymentGateway__UnathorizedCall(paymentToken);
 
-        __handleERC1155Transfer({
-            token_: paymentToken,
-            from_: address(this),
-            to_: payment.to,
-            isBatchTransfer_: false,
-            transferData_: payment.extraData
-        });
+        __safeERC1155TransferFrom(
+            paymentToken,
+            address(this),
+            payment.to,
+            id_,
+            value_
+        );
 
         _afterPayment(paymentToken, paymentType, request, payment);
 
@@ -124,13 +124,13 @@ contract PaymentGateway is
         if (paymentType != uint8(AssetLabel.ERC1155))
             revert PaymentGateway__UnathorizedCall(paymentToken);
 
-        __handleERC1155Transfer({
-            token_: paymentToken,
-            from_: address(this),
-            to_: payment.to,
-            isBatchTransfer_: true,
-            transferData_: payment.extraData
-        });
+        __safeERC1155BatchTransferFrom(
+            paymentToken,
+            address(this),
+            payment.to,
+            ids_,
+            values_
+        );
 
         _afterPayment(paymentToken, paymentType, request, payment);
 
@@ -157,14 +157,7 @@ contract PaymentGateway is
         if (paymentType != uint8(AssetLabel.ERC721))
             revert PaymentGateway__UnathorizedCall(paymentToken);
 
-        __handleERC721Transfer({
-            token_: paymentToken,
-            from_: address(this),
-            to_: payment.to,
-            tokenId_: tokenId_,
-            deadline_: 0,
-            signature_: ""
-        });
+        __safeERC721TransferFrom(paymentToken, from_, payment.to, tokenId_);
 
         _afterPayment(paymentToken, paymentType, request, payment);
 
@@ -216,13 +209,31 @@ contract PaymentGateway is
                     payment_.extraData,
                     (bool, bytes)
                 );
-                __handleERC1155Transfer(
-                    payment_.token,
-                    payment_.from,
-                    payment_.to,
-                    isBatchTransfer,
-                    transferData
-                );
+                if (isBatchTransfer) {
+                    (uint256 tokenId, uint256 amount) = abi.decode(
+                        transferData,
+                        (uint256, uint256)
+                    );
+
+                    __safeERC1155TransferFrom(
+                        payment_.token,
+                        payment_.from,
+                        payment_.to,
+                        tokenId,
+                        amount
+                    );
+                } else {
+                    (uint256[] memory ids, uint256[] memory amounts) = abi
+                        .decode(transferData, (uint256[], uint256[]));
+
+                    __safeERC1155BatchTransferFrom(
+                        payment_.token,
+                        payment_.from,
+                        payment_.to,
+                        ids,
+                        amounts
+                    );
+                }
             } else revert PaymentGateway__InvalidToken(payment_.token);
         }
 
@@ -242,46 +253,15 @@ contract PaymentGateway is
         if (request_.fnSelector == 0) revert PaymentGateway__InvalidArgument();
 
         address paymentToken = payment_.token;
-        return
-            paymentToken == address(0)
-                ? uint8(AssetLabel.NATIVE)
-                : !paymentToken.supportsInterface(type(IERC165).interfaceId)
-                ? uint8(AssetLabel.ERC20)
-                : paymentToken.supportsInterface(type(IERC721).interfaceId)
-                ? uint8(AssetLabel.ERC721)
-                : paymentToken.supportsInterface(type(IERC1155).interfaceId)
-                ? uint8(AssetLabel.ERC1155)
-                : uint8(AssetLabel.INVALID);
-    }
-
-    function __handleERC1155Transfer(
-        address token_,
-        address from_,
-        address to_,
-        bool isBatchTransfer_,
-        bytes memory transferData_
-    ) private {
-        if (isBatchTransfer_) {
-            (uint256 tokenId, uint256 amount) = abi.decode(
-                transferData_,
-                (uint256, uint256)
-            );
-
-            IERC1155(token_).safeTransferFrom(from_, to_, tokenId, amount, "");
-        } else {
-            (uint256[] memory ids, uint256[] memory amounts) = abi.decode(
-                transferData_,
-                (uint256[], uint256[])
-            );
-
-            IERC1155(token_).safeBatchTransferFrom(
-                from_,
-                to_,
-                ids,
-                amounts,
-                ""
-            );
-        }
+        paymentType = paymentToken == address(0)
+            ? uint8(AssetLabel.NATIVE)
+            : !paymentToken.supportsInterface(type(IERC165).interfaceId)
+            ? uint8(AssetLabel.ERC20)
+            : paymentToken.supportsInterface(type(IERC721).interfaceId)
+            ? uint8(AssetLabel.ERC721)
+            : paymentToken.supportsInterface(type(IERC1155).interfaceId)
+            ? uint8(AssetLabel.ERC1155)
+            : uint8(AssetLabel.INVALID);
     }
 
     function __handleERC721Transfer(
@@ -309,7 +289,7 @@ contract PaymentGateway is
             );
         }
 
-        IERC721(token_).safeTransferFrom(from_, to_, tokenId_);
+        __safeERC721TransferFrom(token_, from_, to_, tokenId_);
     }
 
     function __handleERC20Transfer(Payment calldata payment_) private {
@@ -319,7 +299,7 @@ contract PaymentGateway is
         address paymentToken = payment_.token;
 
         IPermit2 _permit2 = permit2;
-        (uint256 allowed, bool supportedEIP2612) = __viewSelfAllowance(
+        (uint256 allowed, bool supportedEIP2612) = __viewERC20SelfAllowance(
             _permit2,
             paymentToken,
             from
@@ -403,10 +383,17 @@ contract PaymentGateway is
     }
 
     function __safeNativeTransfer(address to_, uint256 amount_) private {
+        uint256 _balance = to_.balance;
+
         (bool success, bytes memory returnOrRevertData) = to_.call{
             value: amount_
         }("");
+
         success.handleRevertIfNotSuccess(returnOrRevertData);
+
+        _balance = to_.balance - _balance;
+
+        if (_balance < amount_) revert PaymentGateway__PaymentFailed();
     }
 
     function __safeERC20TransferFrom(
@@ -417,12 +404,81 @@ contract PaymentGateway is
         address to_,
         uint256 amount_
     ) private {
+        uint256 _balance = IERC20(token_).balanceOf(to_);
+
         if (supportedEIP2612_)
             IERC20(token_).safeTransferFrom(from_, to_, amount_);
         else permit2_.transferFrom(from_, to_, amount_.toUint160(), token_);
+
+        _balance = IERC20(token_).balanceOf(to_) - _balance;
+
+        if (_balance < amount_) revert PaymentGateway__PaymentFailed();
     }
 
-    function __viewSelfAllowance(
+    function __safeERC721TransferFrom(
+        address token_,
+        address from_,
+        address to_,
+        uint256 tokenId_
+    ) private {
+        uint256 _balance = IERC721(token_).balanceOf(to_);
+
+        IERC721(token_).safeTransferFrom(from_, to_, tokenId_);
+
+        _balance = IERC721(token_).balanceOf(to_) - _balance;
+
+        if (_balance == 0) revert PaymentGateway__PaymentFailed();
+    }
+
+    function __safeERC1155TransferFrom(
+        address token_,
+        address from_,
+        address to_,
+        uint256 tokenId_,
+        uint256 amount_
+    ) private {
+        uint256 _balance = IERC1155(token_).balanceOf(to_, tokenId_);
+
+        IERC1155(token_).safeTransferFrom(from_, to_, tokenId_, amount_, "");
+
+        _balance = IERC1155(token_).balanceOf(to_, tokenId_) - _balance;
+
+        if (_balance < amount_) revert PaymentGateway__PaymentFailed();
+    }
+
+    function __safeERC1155BatchTransferFrom(
+        address token_,
+        address from_,
+        address to_,
+        uint256[] memory ids_,
+        uint256[] memory amounts_
+    ) private {
+        address[] memory tos = new address[](1);
+        tos[0] = from_;
+
+        uint256[] memory balancesBefore = IERC1155(token_).balanceOfBatch(
+            tos,
+            ids_
+        );
+
+        IERC1155(token_).safeBatchTransferFrom(from_, to_, ids_, amounts_, "");
+
+        uint256[] memory balancesAfter = IERC1155(token_).balanceOfBatch(
+            tos,
+            ids_
+        );
+
+        uint256 length = balancesAfter.length;
+        for (uint256 i; i < length; ) {
+            if (balancesAfter[i] - balancesBefore[i] < amounts_[i])
+                revert PaymentGateway__PaymentFailed();
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+    function __viewERC20SelfAllowance(
         IPermit2 permit2_,
         address token_,
         address owner_

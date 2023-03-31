@@ -6,6 +6,7 @@ import {IPermit2} from "../utils/permit2/interfaces/IPermit2.sol";
 import {IPaymentGatewayCore} from "../core/interfaces/IPaymentGatewayCore.sol";
 
 interface IPaymentGateway is IPaymentGatewayCore {
+    error PaymentGateway__PaymentFailed();
     error PaymentGateway__OnlyEOA(address);
     error PaymentGateway__InvalidArgument();
     error PaymentGateway__InsufficientAllowance();
