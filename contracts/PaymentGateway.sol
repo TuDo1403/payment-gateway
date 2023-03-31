@@ -248,7 +248,14 @@ contract PaymentGateway is
         address sender_,
         Request memory request_,
         Payment memory payment_
-    ) internal virtual override whenNotPaused returns (uint8 paymentType) {
+    )
+        internal
+        view
+        virtual
+        override
+        whenNotPaused
+        returns (uint8 paymentType)
+    {
         if (sender_ != tx.origin) revert PaymentGateway__OnlyEOA(sender_);
         if (request_.fnSelector == 0) revert PaymentGateway__InvalidArgument();
 
